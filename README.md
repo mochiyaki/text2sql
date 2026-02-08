@@ -1,4 +1,4 @@
-# test2sql
+# text2sql
 
 A natural language to SQL query application that allows users to upload CSV files and ask questions about the data using plain English.
 
