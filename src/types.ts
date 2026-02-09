@@ -21,6 +21,7 @@ export interface Config {
   model: string;
   api_key: string;
   show_sql: boolean;
+  show_thinking: boolean;
 }
 
 export interface FileUploadProps {

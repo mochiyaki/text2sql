@@ -240,6 +240,23 @@ function SettingsModal({ isOpen, onClose, config, setConfig }: SettingsModalProp
               <div className="w-11 h-6 bg-dark-bg peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-primary-500 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-primary-600"></div>
             </label>
           </div>
+
+          {/* Thinking Toggle */}
+          <div className="flex items-center justify-between py-2 border-t border-dark-border pt-4">
+            <div>
+              <span className="block text-sm font-medium text-gray-300">Show Thinking Process</span>
+              <span className="text-xs text-gray-500">Display the model's thinking process in responses</span>
+            </div>
+            <label className="relative inline-flex items-center cursor-pointer">
+              <input
+                type="checkbox"
+                checked={config.show_thinking}
+                onChange={(e) => setConfig({ ...config, show_thinking: e.target.checked })}
+                className="sr-only peer"
+              />
+              <div className="w-11 h-6 bg-dark-bg peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-primary-500 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-primary-600"></div>
+            </label>
+          </div>
         </div>
 
         <div className="bg-dark-bg/50 px-6 py-4 flex justify-end border-t border-dark-border">
@@ -264,7 +281,7 @@ function App() {
   const [tables, setTables] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
-  
+
   // Database State
   const dbRef = useRef<SqlJsModule | null>(null);
   const [dbReady, setDbReady] = useState(false);
@@ -273,9 +290,10 @@ function App() {
   // Configuration State
   const [config, setConfig] = useState<Config>({
     port: 1234,
-    model: "t2sql-4b",
+    model: "t2sql",
     api_key: "EMPTY",
-    show_sql: true
+    show_sql: true,
+    show_thinking: true
   });
 
   const chatEndRef = useRef<HTMLDivElement>(null);
@@ -316,7 +334,7 @@ function App() {
         const val = data[0][col];
         let type = "TEXT";
         if (typeof val === 'number') {
-            type = Number.isInteger(val) ? "INTEGER" : "REAL";
+          type = Number.isInteger(val) ? "INTEGER" : "REAL";
         }
         return `"${col}" ${type}`;
       });
@@ -328,7 +346,7 @@ function App() {
       // 3. Insert Data
       const insertStmt = `INSERT INTO "${tableName}" VALUES (${columns.map(() => '?').join(", ")});`;
       const stmt = dbRef.current.prepare(insertStmt);
-      
+
       dbRef.current.exec("BEGIN TRANSACTION");
       data.forEach(row => {
         const values = columns.map(col => row[col]) as import('sql.js').SqlValue[];
@@ -342,7 +360,7 @@ function App() {
         ...prev,
         [tableName]: createStmt
       }));
-      
+
       setTables(prev => prev.includes(tableName) ? prev : [...prev, tableName]);
 
     } catch (err) {
@@ -350,19 +368,26 @@ function App() {
     }
   }, []);
 
+  // Helper function to remove <thinking> tags from content
+  const stripThinkingTags = useCallback((content: string | null): string | null => {
+    if (!content) return null;
+    // Remove <think>...</think> or <thinking>...</thinking> blocks and the tags themselves, handling potential truncations
+    return content.replace(/<think(?:ing)?[\s\S]*?(?:<\/think(?:ing)?>|$)/gi, '').trim();
+  }, []);
+
   const handleSend = async () => {
     if (!input.trim()) return;
 
     if (!dbReady || tables.length === 0) {
-        setMessages(prev => [...prev, { role: 'user', content: input }]);
-        setTimeout(() => {
-            setMessages(prev => [...prev, { 
-                role: 'assistant', 
-                content: "Please upload a CSV dataset first so I can query it!" 
-            }]);
-        }, 500);
-        setInput('');
-        return;
+      setMessages(prev => [...prev, { role: 'user', content: input }]);
+      setTimeout(() => {
+        setMessages(prev => [...prev, {
+          role: 'assistant',
+          content: "Please upload a CSV dataset first so I can query it!"
+        }]);
+      }, 500);
+      setInput('');
+      return;
     }
 
     const userMessage = { role: 'user' as const, content: input };
@@ -390,7 +415,7 @@ Rules:
 - Use SQLite-compatible syntax</task_description>
 You will be given a single task in the question XML block
 Solve only the task in question block.
-Generate only the answer, do not generate anything else`;
+Generate only the solution, do not generate anything else`;
 
       const userPrompt = `
 Now for the real task, solve the task in question block.
@@ -409,17 +434,20 @@ Question: ${userMessage.content}
       const chatResponse = await axios.post(`http://localhost:${config.port}/v1/chat/completions`, {
         model: config.model,
         messages: [
-            { role: "system" as const, content: systemPrompt },
-            { role: "user" as const, content: userPrompt }
+          { role: "system" as const, content: systemPrompt },
+          { role: "user" as const, content: userPrompt }
         ],
         temperature: 0,
         max_tokens: 1024
       });
 
-      let sql = (chatResponse.data as any).choices[0].message.content.trim();
+      let rawContent = (chatResponse.data as any).choices[0].message.content.trim();
 
-      // Clean SQL
-      sql = sql.replace(/```sql/g, '').replace(/```/g, '').trim();
+      // Clean SQL - remove thinking tags and markdown
+      // We always strip thinking tags for execution to avoid syntax errors
+      const strippedContent = stripThinkingTags(rawContent);
+      let sqlContent = strippedContent !== null ? strippedContent : rawContent;
+      let sql = sqlContent.replace(/```sql/g, '').replace(/```/g, '').trim();
 
       // 3. Execute SQL
       let results: DataRow[] = [];
@@ -428,8 +456,8 @@ Question: ${userMessage.content}
       try {
         const stmt = dbRef.current?.prepare(sql);
         while (stmt?.step()) {
-            const row = stmt.getAsObject() as DataRow;
-            results.push(row);
+          const row = stmt.getAsObject() as DataRow;
+          results.push(row);
         }
         stmt?.free();
       } catch (e) {
@@ -437,9 +465,19 @@ Question: ${userMessage.content}
         console.error("SQL Execution Error:", e);
       }
 
+      // Process content - remove thinking tags if disabled
+      // Extract content from LLM response
+
+      // The AI response contains both thinking process and the SQL answer
+      // We need to extract just the SQL part, and strip thinking tags if disabled
+      let contentFromLlm = rawContent.replace(/```sql/g, '').replace(/```/g, '').trim();
+
+      // If thinking is disabled, strip the thinking tags from content
+      const finalContent = config.show_thinking ? contentFromLlm : stripThinkingTags(contentFromLlm);
+
       const aiMessage: Message = {
         role: 'assistant',
-        content: error ? "I encountered an error executing the query." : (results.length === 0 ? "Query executed successfully, but returned no results." : null),
+        content: finalContent,
         sql: config.show_sql ? sql : null,
         data: results,
         error: error
@@ -503,7 +541,7 @@ Question: ${userMessage.content}
               </div>
             )}
             {!dbReady && (
-                <div className="px-2 text-xs text-amber-500">Initializing Database Engine...</div>
+              <div className="px-2 text-xs text-amber-500">Initializing Database Engine...</div>
             )}
           </section>
 
